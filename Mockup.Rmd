@@ -1,0 +1,287 @@
+---
+title: "Instant Advance Mockup V1"
+runtime: shiny
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+    social: menu
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(shiny)
+library(data.table)
+library(plotly)
+library(DT)
+
+
+put_risk_into_data <- function(data, fraud_risk, risk_of_suspeniosn, periods) {
+  dt <- copy(data)
+  
+  N = 1:ncol(dt)
+  rows = 1:nrow(dt)
+  
+  for (row in rows) {
+    fraud = rbinom(n = 1, size = 1, prob = fraud_risk)
+    if (fraud == 1) {
+      dt[row, 1:92 := 0]
+      next()
+    }
+    blocked = rbinom(n = 1, size = 1, prob = risk_of_suspeniosn)
+    if (blocked == 1) {
+      day = sample(x = 1:periods, size = 1, replace = F)
+      dt[row, day:92 := 0]
+    }
+  }
+  
+  return(dt)
+}
+```
+
+```{r, include=FALSE}
+data = fread('data.csv')
+dt_plot = fread('dt_plot.csv', stringsAsFactors = FALSE )
+
+mean_m_sales = round(dt_plot[between(date, '2018-07-01', '2018-09-31'), sum(sales)/.N*30],-2)
+```
+
+Visualizations {data-icon="fa-signal"}
+===================================== 
+
+Column {.sidebar}
+-----------------------------------------------------------------------
+
+
+#### IA parameters
+```{r}
+numericInput("ammount", "Proposed ammount", mean_m_sales, min = 0, max = 1e6)
+hr()
+sliderInput("suspension", label = "Suspension risk:",
+            min = 0, max = 100, value = 5, step = 1, post = '%')
+hr()
+sliderInput("fraud", label = "Fraud risk:",
+            min = 0, max = 100, value = 0.5, step = 0.5, post = '%')
+hr()
+sliderInput("loan", label = "Loan percent:",
+            min = 0.01, max = 1, value = 0.33, step = 0.01)
+hr()
+
+```
+
+1). Instant Advance model has 3 main components:
+
+* Sales prediction model
+
+* Risk models
+    + Suspension risk model
+    + Fraud detection risk model
+    + Any risk model
+    
+* Revenue function
+    + Loan percentage
+    + Loan amount
+    + Loan period (not in current mockup)
+    
+2). Assumptions.
+
+* Sales has already include additional costs
+
+* Loan period is 3 months (fixed)
+
+* Default loan percentage is 33%
+
+* When fraud PYB loose all Lent amount
+
+* When suspended PYB loose only money after suspension
+
+3). Advantages.
+
+* Simplified DM process
+    + Expected profit
+    + Risk of loss
+
+* User can play with results and disagree with some inputs
+
+* More robust model
+
+* User can adjust model for different parameters
+    + Loan amount
+    + Loan percentage
+    + Loan period
+
+* Possibility to manage overall credit portfolio risk
+
+
+
+
+```{r, include=FALSE}
+periods = ncol(data)
+
+results = reactive({
+   dt = put_risk_into_data(data = data, fraud_risk = input$fraud/100, risk_of_suspeniosn = input$suspension/100, periods=periods)
+   sales = rowSums(dt)
+   sales_month = sales/ncol(dt)*30
+   proposed = round(seq(from = 0.5 * input$ammount, to = 1.5 * input$ammount, length.out = 10))
+   sales_share_ours = rowSums(dt * input$loan)
+  
+   
+   dt_compare = data.table(level = as.factor(proposed))
+   dt_compare[, profit := 0]
+   dt_compare[, risk := 0]
+   
+   for (p in seq_along(proposed)) {
+         prop_ = proposed[p]
+         money_lended = prop_ * (1-input$loan)
+         our_profit = pmin(sales_share_ours, prop_) - money_lended
+         dt_compare[level == prop_, profit := round(mean(our_profit))]
+         dt_compare[level == prop_, risk := mean(our_profit < 0)]
+  }
+  return(list(sales = sales, sales_month = sales_month, dt_compare = dt_compare, dt = dt))
+})
+
+ 
+```
+
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Observed sales amount and prediction
+
+```{r}
+
+t = 'Sales amount and prediction'
+renderPlotly({
+  plot_ly(dt_plot) %>%
+  add_lines(x = ~as.Date(date), y = ~sales,
+             name = "Observed sales", color = I('seagreen4')) %>% 
+  add_ribbons(x = ~date, y ~ predicted, ymin = ~lower, ymax = ~upper,  color = I("gray80"),
+              name = "95% confidence interval") %>% 
+    layout(legend = list(x = 0.1, y = 0.9),
+           xaxis = list(showgrid = F,
+                        title = ''),
+           yaxis = list(title = ''))
+           
+})
+```
+
+Column {data-width=350}
+-----------------------------------------------------------------------
+
+### Recommended loan amount and risk of loss
+
+```{r, echo = FALSE}
+ay <- list(
+          title = "Risk of loss",
+          zeroline = FALSE,
+          showline = FALSE,
+          overlaying = "y",
+          side = "right",
+          showticklabels = T,
+          tickformat = "%",
+          automargin = TRUE,
+          showgrid = FALSE,
+          hoverformat = ',.1%'
+        )
+
+t <- list(
+          family = "sans serif",
+          size = 14,
+          color = 'blue')
+
+
+
+
+renderPlotly({
+        d = results()$dt_compare
+        clrs = rep('rgba(204,204,204,1)', 10)
+        max_level = which.max(d$profit)
+        clrs[max_level] = 'rgb(64, 191, 64)'
+        level_ = d[profit == max(profit), level]
+        profit_ = d[, max(profit)]
+        risk_ = d[profit == max(profit), risk]
+        
+        
+        plot_ly(d) %>% 
+        add_trace(x = ~ level, y = ~ profit, type = 'bar', text = ~ profit, name = 'Expected profit', marker = list(color = clrs)) %>% 
+        add_trace(x = ~level, y = ~risk, type = 'scatter', mode = 'lines',  text = ~risk, color = I('brown2'), 
+                   yaxis = 'y2', name= 'Risk of loss')%>% 
+        layout(
+          title = list("Loan recommendation for a seller"),
+          yaxis2 = ay,
+          xaxis = list(title="Recommended loan amount",
+                       ticksuffix = '$'),
+          yaxis = list(ticksuffix = '$',
+                       title = 'Expected profit'),
+          showlegend = FALSE) %>% 
+          add_annotations(
+            x= level_,
+            y= profit_,
+            xref = "x",
+            yref = "y",
+            text = sprintf("Recommended loan ammount : %s US. Expected profit : %s US", level_, profit_),
+            showarrow = T,
+            ax = 0,
+            ay = -30
+          ) %>% 
+          add_annotations(
+            x= level_,
+            y= risk_,
+            xref = "x",
+            yref = "y2",
+            text = sprintf("Risk of loss - %s%%", round(100 * risk_), 2),
+            showarrow = T,
+            ax = 0,
+            ay = -30
+          )
+        
+})
+
+
+```
+
+
+### Average predicted monthly sales 
+```{r}
+renderPlotly({
+  s_month = results()$sales_month
+  sales_mean = round(mean(s_month, na.rm = T), -2)
+  coef_95 = round(quantile(s_month, probs = c(.025, 0.975)) , -2)
+
+  text_sales = sprintf("Average predicted monthly sales : %s US (most likely range : %s US - %s US)", sales_mean, coef_95[1], coef_95[2])
+
+  plot_ly(alpha = 0.6) %>%
+  add_histogram(x = s_month, color = I('#87ceeb')) %>% 
+    add_annotations(
+    x= 1,
+    y= 1,
+    xref = "paper",
+    yref = "paper",
+    text = text_sales,
+    showarrow = F,
+    font = list(
+          family = "sans serif",
+          size = 16,
+          color = '#5c5c8a')
+  ) 
+  
+  }) 
+```
+
+Tables {data-icon="fa-table"}
+=====================================   
+
+
+### Table 1
+    
+```{r}
+renderDataTable({
+  datatable(results()$dt, options = list(
+  pageLength = 200, autoWidth = TRUE, scrollX = TRUE,
+  scrollY = 1000,
+  scroller = TRUE)) %>% 
+formatStyle(colnames(results()$dt), backgroundColor = styleEqual(0, 'red'))
+})
+```
